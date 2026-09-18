@@ -6,7 +6,7 @@
     "service_api": "1.0.0"
   },
   "display_name": "模型层拒答守卫",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "在发送与持久化之前检测 chatter 响应中明显属于模型/平台安全对齐产生的 OOC 拒答，并隔离被拦截的响应；纯代码规则检测，不调用任何额外模型。",
   "author": "言柒",
   "license": "AGPL-v3.0",
@@ -33,6 +33,12 @@
     {
       "component_type": "event_handler",
       "component_name": "response_guard_after_llm_request",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "event_handler",
+      "component_name": "response_guard_before_llm_request",
       "dependencies": [],
       "enabled": true
     },

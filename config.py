@@ -41,6 +41,24 @@ class ResponseGuardConfig(BaseConfig):
                 "无侵入拦截。关闭后仅对外提供 Service，不影响事件链路。"
             ),
         )
+        ndfc_retry_enabled: bool = Field(
+            default=True,
+            description=(
+                "NDFC 响应被拦截后，是否请求框架让该聊天流重新执行一次模型回合。"
+                "关闭后仅拦截，由 NDFC 自然进入等待。"
+                "重试请求本身不携带任何越狱内容，只重新表述回复质量要求。"
+            ),
+        )
+        ndfc_max_retries: int = Field(
+            default=3,
+            description=(
+                "单个聊天流每轮对话允许的 NDFC 重试次数上限。初始请求不计入，"
+                "因此最多产生上限值加一次模型生成。预算耗尽后只拦截不再重试，"
+                "不会因为持续拒答无限循环。设为 0 表示不重试。"
+            ),
+            ge=0,
+            le=5,
+        )
         store_content: bool = Field(
             default=False,
             description=(

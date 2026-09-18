@@ -3,10 +3,11 @@
 对外提供两样东西：
 
 - ``ResponseGuardService``：供 chatter 在发送前主动调用；
-- ``AfterLLMRequestGuardHandler``：通过 ``after_llm_request`` 事件为
-  不允许修改源码的 chatter（NDFC）提供无侵入拦截。
+- ``AfterLLMRequestGuardHandler`` / ``BeforeLLMRequestGuardHandler``：通过
+  ``after_llm_request`` 与 ``before_llm_request`` 事件，为不允许修改源码的
+  chatter（NDFC）提供无侵入拦截与自动恢复。
 
-两者共用同一份检测核心，插件本身不修改框架与其它插件。
+三个组件共用同一份检测核心，插件本身不修改框架与其它插件。
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ from src.app.plugin_system.base import BasePlugin, register_plugin
 
 from .config import ResponseGuardConfig
 from .handlers.after_llm_request import AfterLLMRequestGuardHandler
+from .handlers.before_llm_request import BeforeLLMRequestGuardHandler
+from .runtime.ndfc_retry import reset_all_retry_states
 from .service import ResponseGuardService
 
 logger = get_logger("response_guard")
@@ -44,6 +47,7 @@ class ResponseGuardPlugin(BasePlugin):
         components: list[type] = [ResponseGuardService]
         if config.response_guard.guard_ndfc:
             components.append(AfterLLMRequestGuardHandler)
+            components.append(BeforeLLMRequestGuardHandler)
         return components
 
     async def on_plugin_loaded(self) -> None:
@@ -56,5 +60,11 @@ class ResponseGuardPlugin(BasePlugin):
         logger.info(
             f"response_guard 已加载（enabled={guard.enabled}, "
             f"guard_ndfc={guard.guard_ndfc}, "
+            f"ndfc_retry_enabled={guard.ndfc_retry_enabled}, "
+            f"ndfc_max_retries={guard.ndfc_max_retries}, "
             f"inspect_reasoning={guard.inspect_reasoning}）"
         )
+
+    async def on_plugin_unloaded(self) -> None:
+        """清空运行时重试状态，避免插件重载后残留旧预算。"""
+        reset_all_retry_states()

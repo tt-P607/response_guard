@@ -98,25 +98,70 @@ I cannot comply with this request due to safety guidelines.
 第二次仍然命中时回滚并静默结束本轮，审核文本不会发给用户，也不会留下
 「说过却无下文」的残缺历史。
 
-### NDFC：事件接入（无侵入）
+### NDFC：事件接入（无侵入 + 自动重试）
 
-`neo_default_chatter` 不允许修改源码，因此改由框架的 `after_llm_request`
-事件接入。非流式请求下事件触发时完整响应已经存在，但 assistant payload 尚未
-写回主链；此时清空响应字段，响应本身不再具备可写回内容，NDFC 自然走到
-「无工具调用」分支进入等待，拒答既不会发给用户，也不会进入对话链。
+`neo_default_chatter` 不允许修改源码，因此改由框架的 `after_llm_request` 与
+`before_llm_request` 两个事件接入。
 
-**NDFC 当前为非流式限定**：流式响应在事件触发时尚未产出内容，处理器会直接
-跳过，不做任何判断。第一版不负责自动恢复，只负责拦截与防上下文污染。
+**拦截**：非流式请求下 `after_llm_request` 触发时完整响应已经存在，但
+assistant payload 尚未写回主链；此时清空响应字段，响应本身不再具备可写回
+内容，拒答既不会发给用户，也不会进入对话链。
+
+**恢复**：清空之后，插件通过框架的外部恢复入口（`resume_chatter`）请求该
+聊天流重新执行一次模型回合，使一次被拦截的拒答不至于变成「用户没有收到任何
+回复」。整个链路不修改 NDFC 源码，也不触碰它的内部状态：
+
+```
+命中 MODEL_REFUSAL
+  ↓ 清空 message / reasoning_content / reasoning_parts / tool_calls
+  ↓ resume_chatter(stream_id, source="response_guard_retry")
+NDFC 自己从 WAIT_USER 回到 MODEL_TURN，重新请求 LLM
+  ↓ before_llm_request：剔除内部标记 + 临时注入一次性提醒
+重新检测新响应
+```
+
+NDFC 会把恢复提示当作一条 `ROLE.USER` payload 追加进自己的内存链且不会
+主动移除。为了不让这段内部信号长期停留在发送视图里，`before_llm_request`
+处理器会在**每一次** NDFC 请求发出前剔除所有携带内部标记的 payload；真正的
+重试提醒只在恢复后的那一次请求里临时追加，请求发出后自然消失，不写回任何
+持久结构。
+
+**NDFC 当前为非流式限定**：流式响应在事件触发时尚未产出内容，两个处理器
+都直接跳过，不做任何判断。
 
 事件处理器只处理 `request_name == "neo_default_chatter"` 的请求。KFC 走
 Service 路径，两条路径职责分离，同一份响应不会被重复处理。
 
+### NDFC 重试预算
+
+重试次数按**聊天流**独立计算，默认最多 3 次：
+
+```
+初始请求
++ Guard retry #1
++ Guard retry #2
++ Guard retry #3
+= 最多 4 次模型生成
+```
+
+- 初始请求不计入重试次数；
+- 纯文本拒答与工具调用内容拒答共用同一个预算；
+- 预算耗尽后只拦截不再重试，不会因为模型持续拒答而无限循环；
+- 恢复链中途守卫放行，或一段恢复链结束，都会清空该流的预算；
+- 下一个普通请求重新拥有完整预算，一个群不会被上一次失败长期锁死。
+
 ## 故障降级
 
 守卫自身故障不会影响聊天：
+
 - `response_guard` 插件未安装 → 调用方查询不到 Service，等同未安装；
 - 插件已安装但总开关关闭 → 不注册任何组件；
-- 检测过程抛异常 → 记录错误后返回 `PASS`，正常聊天不受影响。
+- 检测过程抛异常 → 记录错误后返回 `PASS`，正常聊天不受影响；
+- 事件参数缺少 `stream_id`、恢复入口不可用、恢复调用抛异常或未生效 →
+  **拦截照旧成立**，只是放弃自动重试，由 NDFC 自然进入等待。
+
+重试是叠加在拦截之上的增强：任何环节失败都不会让已经拦下的审核回复
+重新发出去，也不会伪造工具结果或用户消息。
 
 ## 安装
 
@@ -135,12 +180,14 @@ Service 路径，两条路径职责分离，同一份响应不会被重复处理
 enabled = true            # 总开关，关闭后不注册任何组件
 inspect_reasoning = true  # 是否检测推理链
 guard_ndfc = true         # 是否通过事件为 NDFC 提供无侵入拦截
+ndfc_retry_enabled = true # NDFC 命中后是否请求框架重新生成一次
+ndfc_max_retries = 3      # 每个聊天流的重试次数上限，0 表示不重试
 log_content = true        # 命中时是否在日志中打印被拦截正文片段
 store_content = false     # 隔离记录是否保留正文片段
 quarantine_size = 20      # 内存隔离缓冲条数
 ```
 
-KFC 的重试策略位于 KFC 自身配置：
+KFC 的重试策略位于 KFC 自身配置，与本插件的 NDFC 重试完全独立：
 
 ```toml
 [general]
@@ -154,10 +201,27 @@ guard_max_retries = 1     # 命中后的原样重试次数上限，0 表示不�
 
 ```
 [HH:MM:SS] response_guard | WARNING | response_guard blocked MODEL_REFUSAL
-  request=kokoro_flow_chatter evidence=reply_platform_refusal retry_index=0
-[HH:MM:SS] response_guard | WARNING | response_guard 被拦截正文: 抱歉，我无法提供这类内容。
-[HH:MM:SS] kfc_orchestrator | WARNING | Response Guard 判定为模型层安全拒答（第 1 次），
-  回滚本轮输出并原样重试；evidence=reply_platform_refusal
+  request=neo_default_chatter evidence=reply_platform_refusal retry_index=0
+[HH:MM:SS] response_guard | WARNING | NDFC Guard retry scheduled
+  stream=<stream_id> retry=1/3
+[HH:MM:SS] response_guard | INFO | NDFC Guard retry reminder injected
+  stream=<stream_id> retry=1/3
+[HH:MM:SS] response_guard | INFO | NDFC Guard retry recovered
+  stream=<stream_id> after=1
+```
+
+预算耗尽时：
+
+```
+[HH:MM:SS] response_guard | WARNING | NDFC Guard retry exhausted
+  stream=<stream_id> max=3; blocked response discarded, falling back to Wait
+```
+
+恢复入口不可用或未生效时：
+
+```
+[HH:MM:SS] response_guard | WARNING | NDFC Guard retry skipped
+  stream=<stream_id>；恢复未生效，本次仅拦截并等待
 ```
 
 **正文来源覆盖工具调用参数。** 模型往往不会直接输出纯文本拒答，而是把拒答
@@ -197,7 +261,15 @@ records = await service.quarantine()
 - 以「服务提供方」口吻用非常规措辞表述的拒答可能漏判；
 - 角色设定本身就是 AI 助手时，「内容元话语 + 规范性拒绝」可能出现误判，
   此类场景建议关闭 `inspect_reasoning` 或调整词表；
-- NDFC 命中后只等待，不自动重试；
+- NDFC 的内部恢复提示会作为一条 USER payload 留在它自己的内存链里。
+  该 payload 在**每次请求**都会被过滤掉，模型看不到它；但上下文压缩发生在
+  过滤之前，压缩摘要仍有极小概率间接看到这段文本。这也是恢复提示被刻意
+  写成「极短 + 语义无害」的原因：即使被写进摘要，也不会改变角色设定、剧情
+  走向或安全状态。彻底消除这一点需要修改 NDFC 或框架源码，不在本插件范围内；
+- 非公开入口 `ChatterManager.resume_chatter` 目前没有对应的 Plugin API，
+  只能在 `runtime/framework_compat.py` 中直接引用（仓库已有多个插件这么做）。
+  该引用被集中隔离在单一模块内，未来框架提供正式 API 时只需替换这一处；
+- 重试状态保存在内存中，进程重启后清空。
 - 日志中的正文是截断片段，无法用于完整还原被拦截内容。
 
 ## 许可
