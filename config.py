@@ -48,6 +48,15 @@ class ResponseGuardConfig(BaseConfig):
                 "开启后正文片段会进入内存缓冲，仅用于人工复核规则。"
             ),
         )
+        log_content: bool = Field(
+            default=True,
+            description=(
+                "命中拦截时是否在日志中打印被拦截正文的截断片段。"
+                "开启后日志会包含实际会被发送的文本内容（含工具调用的"
+                " content 参数），便于判断是真实拒答还是规则误伤；"
+                "关闭后日志只保留证据标签与长度。"
+            ),
+        )
         quarantine_size: int = Field(
             default=20,
             description="内存隔离缓冲保留的记录条数，设为 0 表示不记录。",

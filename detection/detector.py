@@ -14,7 +14,7 @@ from .patterns import TOOL_TEXT_KEYS
 from .reasoning import inspect_reasoning
 from .reply import inspect_reply
 
-__all__ = ["inspect_response", "join_reasoning"]
+__all__ = ["inspect_response", "iter_visible_texts", "join_reasoning"]
 
 
 def inspect_response(
@@ -46,7 +46,7 @@ def inspect_response(
         if reasoning_blob:
             _collect(inspect_reasoning(reasoning_blob), blocked, uncertain)
 
-    for text in _iter_visible_texts(reply_text, tool_calls):
+    for text in iter_visible_texts(reply_text, tool_calls):
         _collect(inspect_reply(text), blocked, uncertain)
 
     if blocked:
@@ -95,10 +95,23 @@ def join_reasoning(
     return reasoning_text if isinstance(reasoning_text, str) else ""
 
 
-def _iter_visible_texts(
+def iter_visible_texts(
     reply_text: str | None, tool_calls: Sequence[Any]
 ) -> Iterator[str]:
-    """产出所有「实际会被用户看到」的文本片段。"""
+    """产出所有「实际会被用户看到」的文本片段。
+
+    对话中的拒答往往被模型包装进工具调用的 ``content`` 参数（例如把
+    「抱歉，我无法提供这类内容」作为 ``kfc_reply`` 的参数传出），此时
+    ``message`` 可能为空或只含动作描写，因此正文检测与日志输出都必须
+    覆盖工具参数。
+
+    Args:
+        reply_text: 响应正文（``message``）。
+        tool_calls: 本轮工具调用。
+
+    Yields:
+        str: 未经拼接的单段文本，避免不同段落的词产生虚假共现。
+    """
     if isinstance(reply_text, str) and reply_text.strip():
         yield reply_text
     for call in tool_calls:

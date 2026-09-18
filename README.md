@@ -114,7 +114,6 @@ Service 路径，两条路径职责分离，同一份响应不会被重复处理
 ## 故障降级
 
 守卫自身故障不会影响聊天：
-
 - `response_guard` 插件未安装 → 调用方查询不到 Service，等同未安装；
 - 插件已安装但总开关关闭 → 不注册任何组件；
 - 检测过程抛异常 → 记录错误后返回 `PASS`，正常聊天不受影响。
@@ -136,6 +135,7 @@ Service 路径，两条路径职责分离，同一份响应不会被重复处理
 enabled = true            # 总开关，关闭后不注册任何组件
 inspect_reasoning = true  # 是否检测推理链
 guard_ndfc = true         # 是否通过事件为 NDFC 提供无侵入拦截
+log_content = true        # 命中时是否在日志中打印被拦截正文片段
 store_content = false     # 隔离记录是否保留正文片段
 quarantine_size = 20      # 内存隔离缓冲条数
 ```
@@ -148,11 +148,35 @@ guard_enabled = true      # 是否启用响应守卫
 guard_max_retries = 1     # 命中后的原样重试次数上限，0 表示不重试
 ```
 
+## 日志
+
+命中拦截时默认会打印被拦截的正文，便于判断是真实拒答还是规则误伤：
+
+```
+[HH:MM:SS] response_guard | WARNING | response_guard blocked MODEL_REFUSAL
+  request=kokoro_flow_chatter evidence=reply_platform_refusal retry_index=0
+[HH:MM:SS] response_guard | WARNING | response_guard 被拦截正文: 抱歉，我无法提供这类内容。
+[HH:MM:SS] kfc_orchestrator | WARNING | Response Guard 判定为模型层安全拒答（第 1 次），
+  回滚本轮输出并原样重试；evidence=reply_platform_refusal
+```
+
+**正文来源覆盖工具调用参数。** 模型往往不会直接输出纯文本拒答，而是把拒答
+包装成工具调用——例如把「抱歉，我无法提供这类内容」作为 `action-kfc_reply`
+的 `content` 参数传出。此时 `message` 可能为空或只含动作描写，只看 `message`
+会什么都看不到。因此日志会收集全部对外可见文本：`message`，以及工具调用中
+`content` / `text` / `message` / `reply` 参数下的字符串（含数组形式）。
+
+`thought` / `mood` / `reason` 等内部字段不属于用户可见内容，不进日志。
+
+换行与连续空白会归一化为空格，保证一条日志一行可读；单段超过 200 字符时
+截断并标注「（已截断）」。
+
+`log_content = false` 时日志只保留证据标签，不输出正文。
+
 ## 隔离记录
 
-默认**不保存**被拦截响应的正文与推理原文，只保留可审计的元数据：时间、
-请求名、模型标识、判定、证据标签、长度、内容哈希、重试序号。日志同样只输出
-证据标签与长度，不输出整段文本。
+隔离缓冲默认**不保存**被拦截响应的正文与推理原文，只保留可审计的元数据：
+时间、请求名、模型标识、判定、证据标签、长度、内容哈希、重试序号。
 
 元数据通过 Service 读取：
 
@@ -163,8 +187,8 @@ service = get_service("response_guard:service:response_guard")
 records = await service.quarantine()
 ```
 
-需要人工复核规则时，可临时开启 `store_content = true`，隔离记录会额外保留
-截断到 160 字符的正文片段。
+需要额外留存正文时开启 `store_content = true`，隔离记录会保留截断到 160
+字符的正文片段。隔离缓冲位于内存，进程重启后清空。
 
 ## 已知限制
 
@@ -173,7 +197,8 @@ records = await service.quarantine()
 - 以「服务提供方」口吻用非常规措辞表述的拒答可能漏判；
 - 角色设定本身就是 AI 助手时，「内容元话语 + 规范性拒绝」可能出现误判，
   此类场景建议关闭 `inspect_reasoning` 或调整词表；
-- NDFC 命中后只等待，不自动重试。
+- NDFC 命中后只等待，不自动重试；
+- 日志中的正文是截断片段，无法用于完整还原被拦截内容。
 
 ## 许可
 
